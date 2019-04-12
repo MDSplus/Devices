@@ -1,9 +1,4 @@
 #!/usr/bin/python
-"""
-FPGA image available from
-https://github.com/zack-vii/Anacleto/projects/w7x_timing/
-
-"""
 import numpy as _n, socket as _s, struct as _p
 
 """ STATE CONSTANTS """
@@ -36,8 +31,8 @@ class remote(object):
         self.connect()
     def connect(self):
         self.sock = _s.socket(_s.AF_INET, _s.SOCK_STREAM)
+        self.sock.settimeout(3) # connect would never return if device offline
         self.sock.connect(self._address)
-        self.sock.settimeout(3)
     def _exchange_str(self,msg,force_str=False):
         def _tryexchange(msg):
             self.sock.send(msg)
@@ -232,7 +227,7 @@ if __name__=="__main__":
 """ DEVICE """
 
 try:
-  from MDSplus import Data,Device,version,DevINV_SETUP,TreeNODATA
+  from MDSplus import Data,Device,version,DevINV_SETUP,DevOFFLINE,TreeNODATA
   tostr = version.tostr
   class W7X_TIMING(Device) :
     """
@@ -277,7 +272,8 @@ try:
     @property
     def com(self):
         if self._com is None:
-            self._com = remote(self._host)
+            try: self._com = remote(self._host)
+            except _s.timeout: raise DevOFFLINE
         return self._com
     @property
     def _clock(self):
@@ -380,8 +376,8 @@ try:
             return Tree(expt,-1,'ReadOnly').getNode(path)
 
     def sync(self):
-        from MDSplus import Data,TreeNode,TreeNodeArray,Compound,DATA,Int32
-        from MDSplus import TreeNODATA,TreeTREENF,TreeBADRECORD,TreeNNF
+        from MDSplus import Data,TreeNode,TreeNodeArray,Compound,Int32
+        from MDSplus import TreeNODATA,TreeBADRECORD,TreeNNF
         master = self.master
         mnids  = Int32(master.conglomerate_nids).data().tolist()
         def relink(val):
