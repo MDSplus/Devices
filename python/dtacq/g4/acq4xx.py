@@ -1352,7 +1352,7 @@ class _CARRIER(_DTACQ):  # HINT: _CARRIER
         for i in range(num_modules):
             cls._channel_offset.append(cls._num_channels)
             prefix = ':MODULE%d'%(i+1)
-            cls.parts.append({'path': prefix, 'type':'text', 'value':module.__name__, 'options': ('write_once',)})
+            cls.parts.append({'path': prefix, 'type':'text', 'value':module.__name__[1:], 'options': ('write_once',)})
             module._addModuleKnobs(cls,prefix)
             cls._num_channels += module._num_channels
             if i==0: module._addMasterKnobs(cls,prefix)
@@ -2066,7 +2066,8 @@ class _MGT(object):
             super(_MGT.STREAM,self).__init__(name="MGT.STREAM(%d)"%port)
             self._stop = threading.Event()
             self.port = port
-            self.tree = dev.tree
+            self.tree = dev.tree.tree
+            self.shot = dev.tree.shot
             self.path = dev.path
             self.post    = dev._post
             self.trigger = dev._trigger
@@ -2103,7 +2104,7 @@ class _MGT(object):
                 raise
             try:
                 MDSplus.Tree.usePrivateCtx(True)
-                dev = MDSplus.Tree(self.tree.tree,self.tree.shot).getNode(self.path)
+                dev = MDSplus.Tree(self.tree,self.shot).getNode(self.path)
                 idx = 0
                 fullpath = self.get_fullpath(idx)
                 max_idx  = self.post/self._shape[1]
