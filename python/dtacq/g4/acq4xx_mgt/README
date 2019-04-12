@@ -1,0 +1,8 @@
+mgt support (example for CentOS 7)
+
+
+* Get drive from https://github.com/petermilne/AFHBA404
+* Compile kernel module afhba.ko and place it in /root/
+* Copy mgt_arm, mgt_stream, and mgt_deinit in a visible (PATH env) bin folder
+
+!!! ipmi commands to control the fan may vary !!!

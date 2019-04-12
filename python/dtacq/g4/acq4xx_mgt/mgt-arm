@@ -1,0 +1,24 @@
+#!/bin/sh
+if test ! $(id -u) == 0
+then
+ sudo $0 "$@"
+ exit $?
+fi
+
+if !(grep -q afhba /proc/modules>/dev/null 2>&1)
+then
+  insmod /root/afhba.ko ll_mode_only=0 reg_access_verbose=0 \
+    afhba4_stream=2 nbuffers=99 buffer_len=0x400000 \
+    aurora_monitor=-1 eot_interrupt=0 WORK_TO=1 \
+    dma_descriptor_ram=1 assume_stuck_buffers_are_ok=1
+  sleep 1
+fi
+
+if !(grep +LANE_UP /dev/rtm-t.0.ctrl/aurora>/dev/null 2>&1 && grep +LANE_UP /dev/rtm-t.1.ctrl/aurora>/dev/null 2>&1)
+then
+  echo lanes are down
+  exit 1
+fi
+killall rtm-t-stream-disk 2>/dev/null
+#            --fan speed--- set  zone val%  100% : 17500 rpm
+ipmitool raw 0x30 0x70 0x66 0x01 0x01 0x64 >/dev/null && echo fan 100% || echo fan failed

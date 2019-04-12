@@ -1,0 +1,39 @@
+#!/bin/sh
+echo $0 "$@"
+if test -z $1 || ! test $1 -ge 0
+then
+ echo "$0 <port> [concat]"
+ exit 1
+elif test ! $(id -u) == 0
+then
+ sudo $0 "$@"
+ exit $?
+fi
+
+RTM_DEVNUM=$1
+
+if test -z $2
+then BLOCKGRP=1
+else BLOCKGRP=$2
+fi
+
+OUTROOT=/data/$1
+
+if test -d $OUTROOT
+then rm -rf $OUTROOT
+fi
+
+
+set -e
+umask 0002
+mkdir -p $OUTROOT
+chmod g+s $OUTROOT
+chown mdsplus-qxt $OUTROOT
+setfacl -d -m g::7 $OUTROOT
+let CONCAT=$BLOCKGRP-1 || CONCAT=0
+
+
+OUTROOT=$OUTROOT \
+CONCAT=$CONCAT \
+RTM_DEVNUM=$RTM_DEVNUM \
+exec nice -n -20 /usr/bin/rtm-t-stream-disk
