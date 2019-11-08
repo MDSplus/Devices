@@ -1,39 +1,41 @@
-#!/bin/sh
+#!/bin/bash
 echo $0 "$@"
-if test -z $1 || ! test $1 -ge 0
+if [ -z $1 -o $1 -lt 0 ]
 then
  echo "$0 <port> [concat]"
  exit 1
-elif test ! $(id -u) == 0
+elif [ $(id -u) -ne 0 ]
 then
- sudo $0 "$@"
+ sudo $0 "$1" "$2" "$(id -un)"
  exit $?
+elif [ -z $3 ]
+then USER=$(id -un)
+else USER=$3
 fi
 
 RTM_DEVNUM=$1
+/mgt/mgt-deinit $RTM_DEVNUM
 
-if test -z $2
+if [ -z $2 ]
 then BLOCKGRP=1
 else BLOCKGRP=$2
 fi
 
 OUTROOT=/data/$1
 
-if test -d $OUTROOT
+if [ -d $OUTROOT ]
 then rm -rf $OUTROOT
 fi
-
 
 set -e
 umask 0002
 mkdir -p $OUTROOT
 chmod g+s $OUTROOT
-chown mdsplus-qxt $OUTROOT
-setfacl -d -m g::7 $OUTROOT
+chown $USER $OUTROOT
+setfacl -d -m g:$USER:7 $OUTROOT
 let CONCAT=$BLOCKGRP-1 || CONCAT=0
-
 
 OUTROOT=$OUTROOT \
 CONCAT=$CONCAT \
 RTM_DEVNUM=$RTM_DEVNUM \
-exec nice -n -20 /usr/bin/rtm-t-stream-disk
+exec nice -n -20 /mgt/rtm-t-stream-disk
