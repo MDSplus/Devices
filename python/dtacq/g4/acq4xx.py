@@ -24,11 +24,10 @@
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #
 
-# Author: Timo Schroeder, Alexander H Card
+# Author: Timo Schroeder
 
 # TODO:
 # - server side demuxing for normal opperation not reliable, why?
-# - find a way to detemine when the device is armed in mgt(dram)
 # - properly check if the clock is in range
 #  + ACQ480: maxADC=80MHz, maxBUS=50MHz, minBUS=10MHz, maxFPGA_FIR=25MHz
 #
@@ -41,6 +40,7 @@ else:
     xrange = range
 try:    import hashlib
 except: hashlib = None
+run_test = False
 debug = 0
 with_mgtdram = False # untested
 def dprint(*line):
@@ -263,7 +263,7 @@ class nc(object):
 
 class channel(nc):
     """
-    MDSplus-independent way of opening a data channel to stream out data from the carrier.
+    Open a data channel to stream out data from the carrier.
     Call it independently as: ch = channel([num],host)
     """
     def __str__(self):
@@ -286,7 +286,6 @@ class channel(nc):
 
 class stream(nc):
     """
-    MDSplus-independent class
     ACQ400 FPGA class purposed for streaming data from participating modules
     data reduction either thru duty cycle or subset
     set.site 0 STREAM_OPTS --subset=3,4 # for chans 3,4,5,6
@@ -296,7 +295,6 @@ class stream(nc):
 
 class gpg(nc):
     """
-    MDSplus-independent class
     ACQ400 FPGA class purposed for programming the General Pulse Generator
     """
     def __init__(self,server='localhost'):
@@ -475,9 +473,6 @@ class STATE:
 ###--------------
 
 class _property_str(object):
-    """
-    MDSplus-independent class
-    """
     def getdoc(self):return self.__doc__
     ro = False
     _cast = str
@@ -519,13 +514,10 @@ class _property_list_f(_property_str):
         return tuple(float(v) for v in inst(self._cmd).split(' ',1)[1].split(' '))
 
 class _property_grp(object):
-    """
-    MDSplus-independent class
-    """
     _parent = None
     def getdoc(self):return self.__doc__
     def __call__(self,cmd,*args):
-        # allows for nextes structures, e.g. acq.SYS.CLK.COUNT
+        # allows for nested structures, e.g. acq.SYS.CLK.COUNT
         return self._parent('%s:%s'%(self.__class__.__name__,str(cmd)),*args)
     def __str__(self):
         if isinstance(self._parent,_property_grp):
@@ -573,9 +565,6 @@ class _property_exe(_property_grp):
         self._parent(self.__class__.__name__ if self._cmd is None else self._cmd,self._args)
 
 class _property_idx(_property_grp):
-    """
-    MDSplus-independent class
-    """
     _format_idx = '%d'
     _cast = lambda s,x: x
     _format = '%s'
@@ -593,9 +582,6 @@ class _property_idx(_property_grp):
         return [self.set(i+1,v) for i,v in enumerate(value)]
 
 class _property_cnt(_property_grp):
-    """
-    MDSplus-independent class
-    """
     class RESET(_property_exe): pass
     COUNT = _property_int('COUNT', 1)
     FREQ  = _property_float('FREQ',  1)
@@ -655,6 +641,12 @@ class carrier_knobs(dtacq_knobs):
     live_mode = _property_int('live_mode',doc="Streaming: CSS Scope Mode {0:off, 1:free-run, 2:pre-post}")
     live_pre  = _property_int('live_pre',doc="Streaming: pre samples for pre-post mode")
     live_post = _property_int('live_post',doc="Streaming: post samples for pre-post mode")
+    def off_slo(self,*sites): # custom
+        if len(sites)==1 and isinstance(sites[0],(list,tuple)):
+            sites=sites[0]
+        res = self('off_slo %s'%(self._tupletostr(sites),)).strip()
+        off_slo = [[float(c) for c in r.split(' ')] for r in res.split('\n')]
+        return zip(*off_slo)
     def play0(self,*args):
         """Initializing the distributor: feeds data from distributor to active sites"""
         return self('play0',args)
@@ -742,7 +734,10 @@ class carrier_knobs(dtacq_knobs):
         value = tuple(str(e) for e in value[:3])
         #self('GPG_TRG %s\nGPG_TRG:DX %s\nGPG_TRG:SENSE %s'%value)
         self('gpg_trg %s,%s,%s'%value) # captized version is unreliable
+    class LIVE(_property_grp): # custom
+        MODE = _property_str('MODE',1,doc="Live mode {0:off, 1:free-run, 2:pre-post}")
     class SIG(_property_grp):
+        class SOFT_TRIGGER(_property_exe): pass# custom
         ZCLK_SRC  = _property_str('ZCLK_SRC', doc='INT33M, CLK.d0 - CLK.d7')
         class FP(_property_grp):
             CLKOUT= _property_str('CLKOUT')
@@ -752,7 +747,8 @@ class carrier_knobs(dtacq_knobs):
             class CLK (_property_idx): pass
             class SYNC(_property_idx): pass
             class TRG (_property_idx): pass
-        class CLK(_property_grp): pass
+        class CLK(_property_grp):
+            TRAIN_REQ = _property_int('TRAIN_REQ',1) # custom
         class CLK_EXT (_property_cnt): pass
         class CLK_MB  (_property_cnt):
             FIN = _property_int('FIN',doc='External input frequency')
@@ -885,35 +881,35 @@ class module_knobs(site_knobs):
     def CLK_ALL(self,value):
         value = tuple(str(e) for e in value[:3])
         #self('CLK %s\nCLK:DX %s\nCLK:SENSE %s'%value)
-        self('clk %s,%s,%s'%value) # captized version is unreliable
+        self('clk %s,%s,%s'%value) # captized version is not shared
     @property
     def TRG_ALL(self):  return self.trg
     @TRG_ALL.setter
     def TRG_ALL(self,value):
         value = tuple(str(e) for e in value[:3])
         #self('TRG %s\nTRG:DX %s\nTRG:SENSE %s'%value)
-        self('trg %s,%s,%s'%value) # captized version is unreliable
+        self('trg %s,%s,%s'%value) # captized version is not shared
     @property
     def EVENT0_ALL(self):  return self.event0
     @EVENT0_ALL.setter
     def EVENT0_ALL(self,value):
         value = tuple(str(e) for e in value[:3])
         #self('EVENT0 %s\nEVENT0:DX %s\nEVENT0:SENSE %s'%value)
-        self('event0 %s,%s,%s'%value) # captized version is unreliable
+        self('event0 %s,%s,%s'%value) # captized version is not shared
     @property
     def EVENT1_ALL(self):  return self.event1
     @EVENT1_ALL.setter
     def EVENT1_ALL(self,value):
         value = tuple(str(e) for e in value[:3])
         #self('EVENT1 %s\nEVENT1:DX %s\nEVENT1:SENSE %s'%value)
-        self('event1 %s,%s,%s'%value) # captized version is unreliable
+        self('event1 %s,%s,%s'%value) # captized version is not shared
     @property
     def RGM_ALL(self):  return self.rgm
     @RGM_ALL.setter
     def RGM_ALL(self,value):
         value = tuple(str(e) for e in value[:3])
         #self('RGM %s\nRGM:DX %s\nRGM:SENSE %s'%value)
-        self('rgm %s,%s,%s'%value) # captized version is unreliable
+        self('rgm %s,%s,%s'%value) # captized version is not shared
     RTM_TRANSLEN = _property_int('RTM_TRANSLEN',doc='samples per trigger in RTM; should fill N buffers')
 
 class acq4xx_knobs(module_knobs):
@@ -972,10 +968,7 @@ class ao420_knobs(module_knobs):
 ###-----------------
 
 class dtacq(nc,dtacq_knobs):
-    """
-    MDSplus-independent
-    """
-    _excutables = []
+    _exclude = []
     _transient = ['state','shot']
     _help = None
     _helpA = None
@@ -997,10 +990,9 @@ class dtacq(nc,dtacq_knobs):
         self.cache = self._cache.get(server,None)
         if self.cache is not None:
             self.cache = self.cache.setdefault(str(site),{})
-    @staticmethod
-    def filter_result(cmd,res,val):
+    def filter_result(self,cmd,res,val):
         cmd = cmd.strip()
-        if cmd in dtacq._excutables or cmd in dtacq._transient or cmd.endswith(':RESET'):
+        if cmd in self._exclude or cmd in self._transient or cmd.endswith(':RESET'):
             return cmd,None
         res = res.strip()
         if res.startswith(cmd):
@@ -1020,7 +1012,7 @@ class dtacq(nc,dtacq_knobs):
             for i in range(len(rows)):
                 cmd = rows[i].strip().split(' ',2)
                 res = rres[i] if sync else ''
-                cmd,res = dtacq.filter_result(cmd[0],res,cmd[1:])
+                cmd,res = self.filter_result(cmd[0],res,cmd[1:])
                 if res is not None:
                     self.cache[cmd] = res
         if ans: return dbg[1]
@@ -1070,8 +1062,12 @@ class carrier(dtacq,carrier_knobs):
     _log = None
     ai_sites = None
     ao_sites = None
-    _excutables = dtacq._excutables + ['acqcmd','get.site','reboot','run0','play0','soft_transient','soft_trigger',
-        'TRANSIENT:SET_ARM','TRANSIENT:SET_ABORT','set_arm','set_abort','SIG:SOFT_TRIGGER']
+    _exclude = dtacq._exclude + [
+        'get.site','reboot',
+        'soft_transient','soft_trigger','SIG:SOFT_TRIGGER',
+        'streamtonowhered','CONTINUOUS','TRANSIENT',
+        'TRANSIENT:SET_ARM','TRANSIENT:SET_ABORT','set_arm','set_abort',
+    ]
     def __init__(self,server): super(carrier,self).__init__(server,0)
     @property
     def log(self):
@@ -1740,7 +1736,7 @@ class _mgt482(_streaming):
                 os.mkdir(self._folder)
             log = open("/tmp/mgt-stream-%d.log"%(self.devid,),'w')
             try:
-                params = ['mgt-stream',str(self.devid),str(self.blockgrp)]
+                params = ['/mgt/mgt-stream',str(self.devid),str(self.blockgrp)]
                 self.stream = subprocess.Popen(params,stdout=log,stderr=subprocess.STDOUT)
             except:
                 log.close()
@@ -1811,11 +1807,11 @@ class _mgt482(_streaming):
     def arm_stream(self):
         self.nc.STREAM_OPTS(nowhere=True)
         self.nc.OVERSAMPLING=0
-        ERR = os.system('mgt-arm')
+        ERR = os.system('/mgt/mgt-arm')
         if ERR !=0: print("ERROR %d during mgt-arm"%(ERR,))
     def deinit_stream(self):
         devs = [str(self.get_devid(port)) for port in range(2)]
-        cmd = 'mgt-deinit %s'%(','.join(devs),)
+        cmd = '/mgt/mgt-deinit %s'%(','.join(devs),)
         ERR = os.system(cmd)
         if ERR !=0: print("ERROR %d during %s"%(ERR,cmd))
     def start_stream(self):
@@ -1936,7 +1932,7 @@ class _carrier(_dtacq):
     def _slice(self,ch): return slice(None,None,1)
     def soft_trigger(self):
         """ sends out a trigger on the carrier's internal trigger line (d1) """
-        self.nc.soft_trigger()
+        self.nc.soft_trigger()#SIG.SOFT_TRIGGER()
     def reboot(self):
         self.nc.reboot()
     def init(self,ext_clk=None,clock=1000000,pre=0,post=1<<20,soft_out=False,di=1):
@@ -1947,7 +1943,12 @@ class _carrier(_dtacq):
         self.setting_post = int(post)
         self._master.setting_soft_out = bool(soft_out)
         self._init()
-        self.commands = json.dumps(dtacq.remove_cache(self.setting_host))
+        dic = dtacq.remove_cache(self.setting_host)
+        if 0 in dic:
+            c = dic[0]
+            for k in self.nc._exclude:
+                if k in c: del(c[k])
+        self.commands = json.dumps(dic)
 
     def _init(self):
         """ initialize all device settings """
@@ -2461,7 +2462,8 @@ def test_without_mds():
 
 try: import MDSplus
 except:
-    ai,ao = test_without_mds()
+    if run_test:
+        ai,ao = test_without_mds()
 else:
 ###-----------------
 ### MDSplus property
@@ -3415,8 +3417,8 @@ else:
             A.trigger_post = 100000
             A.ACTIONSERVER.SOFT_TRIGGER.on = True
             A=a.ACQ2106_ACQ425x2.Add(t,'ACQ425x2_M2')
-            A.mgt_a_sites = MDSplus.Int32([1,2])
-            #A.mgt_b_sites = MDSplus.Int32([2])
+            A.mgt_a_sites = MDSplus.Int32([1])
+            A.mgt_b_sites = MDSplus.Int32([2])
             A.host      = cls.acq2106_425_host
             #A.clock_src = 10000000
             A.clock     = 1000000
@@ -3581,7 +3583,7 @@ else:
 
     @staticmethod
     def get425Tests():
-        return ['test425Normal','test425X6Normal','test425X6Stream']
+        return ['test425Normal','test425X2Normal','test425X2Stream']
 
     @staticmethod
     def get420Tests():
@@ -3685,7 +3687,7 @@ else:
             run420()
         elif sys.argv[1]=='testmgtdram':
             runmgtdram(*sys.argv[2:])
-    if 0:
+    if run_test:
         Tests.simulate = True
         t=Tests()
         t.setUpClass()
