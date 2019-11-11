@@ -1160,10 +1160,8 @@ class carrier(dtacq,carrier_knobs):
         if self.ai_sites is not None: self.run0(*self.ai_sites)
         if self.ao_sites is not None: self.play0(*self.ao_sites)
         if not shot is None: self.shot = shot
-        self._setup_clock(ext,mb_fin,mb_set)
-        #self.chainstart()
         self._setup_trigger(pre,post,soft_out,demux)
-        #self.chainsend()
+        self._setup_clock(ext,mb_fin,mb_set)
     def _setup_clock(self,ext,mb_fin,mb_set):
         if ext:
             self.SYS.CLK.FPMUX = 'FPCLK'
@@ -1545,6 +1543,7 @@ class _dtacq(object):
 ### STREAMING
 class _streaming(object):
     active_ports = (0,)
+    setting_stream = 'off'
     @property
     def id(self): "%s_%03d"%(self.setting_host,self.setting_shot)
     __streams = {}
@@ -1557,7 +1556,7 @@ class _streaming(object):
             self._streaming__streams[self.id] = value
         elif self.id in self._streaming__streams:
             self._streaming__streams.pop(self.id)
-    class STREAM(threading.Thread):
+    class _STREAM(threading.Thread):
         port      = 0
         devid     = 0
         triggered = False
@@ -1565,11 +1564,24 @@ class _streaming(object):
         def __init__(self,dev,port,share,name=None):
             if name is None:
                 name = "%s(%s,%d)"%(self.__class__.__name__,dev,port)
-            super(_streaming.STREAM,self).__init__(name=name)
+            super(_streaming._STREAM,self).__init__(name=name)
             self._stop = threading.Event()
             self.port  = port
             self.dev   = dev
             self.share = share
+            self._init()
+        def _init(self):
+            NCHAN = self.dev.nc.NCHAN
+            self.startchan,self.nchan = 0,NCHAN # TODO: implement custom subset
+            # final setup
+            self.dev.nc.OVERSAMPLING = 0 # other values would ev. skip samples
+            subset = (self.startchan+1,self.nchan) if self.nchan<NCHAN else None
+            self.dev.nc.STREAM_OPTS(subset=subset)
+            self.sock = stream(self.dev.setting_host).sock # starts stream
+            time.sleep(2)
+
+        @property
+        def chanlist(self): return range(self.startchan,self.startchan+self.nchan)
         @property
         def on(self): return not self._stop.is_set()
         def stop(self): self._stop.set()
@@ -1587,44 +1599,46 @@ class _streaming(object):
                 rem_bytes -= blen
             return req_bytes-rem_bytes,b''.join(ret)
         def run(self):
-            NCHAN = self.dev.nc.NCHAN
             # bufferlen = self.dev.nc.bufferlen
-            startchan,nchan = 1,NCHAN # TODO: implement custom subset
-            buflen = nchan*self.nSamples*2 # should be multiple of bufferlen
-            shape = (nchan,self.nSamples)
-            # final setup
-            self.dev.nc.OVERSAMPLING = 0 # other values would ev. skip samples
-            subset = (startchan,nchan) if nchan<NCHAN else None
-            self.dev.nc.STREAM_OPTS(subset=subset)
-            sock = stream(self.dev._host).sock # starts stream
+            buflen = self.nchan*self.nSamples*2 # should be multiple of bufferlen
+            shape = (self.nchan,self.nSamples)
+            samp_idx = 0
             try:
                 read = 0
-                sock.settimeout(1)
+                self.sock.settimeout(1)
                 # wait for trigger
-                read,buf = self.recv(sock,buflen,False)
+                read,buf = self.recv(self.sock,buflen,False)
                 if read==0: return
+                buf = numpy.frombuffer(buf,'<i2').reshape(shape)
                 self.triggered = True
                 while read==buflen:
-                    self.store(buf,shape,'<i2')
-                    read,buf = self.recv(sock,buflen,True)
+                    self.store(samp_idx,numpy.frombuffer(buf,'<i2').reshape(shape))
+                    if not self.on: return
+                    samp_idx += shape[1]
+                    read,buf = self.recv(self.sock,buflen,True)
                 else:# store rest
-                    samples = read//nchan//2
+                    samples = read//self.nchan//2
                     if samples>0:
-                        self.store(buf,(nchan,samples),'<i2')
+                        self.store(samp_idx,numpy.frombuffer(buf[:self.nchan*samples*2],'<i2').reshape((self.nchan,samples)))
+            except socket.timeout: pass
             finally:
-                sock.close()
+                self.sock.close()
+        def store(self,buf,shape,format):
+            dat = numpy.frombuffer(buf,format).reshape(shape)
+            print(dat,shape,format)
     def arm_stream(self):    pass
-    def start_stream(self):  self.nc.TRANSIENT()
-    def stop_stream(self):   self.nc.CONTINUOUS_stop()
+    def start_stream(self):  pass
+    def stop_stream(self):
+        self.nc.CONTINUOUS_start() # otherwise stream did not stop
+        self.nc.CONTINUOUS_stop()
     def deinit_stream(self): pass
     def streaming_arm(self,stream_cls):
         if not self._streams is None: raise Exception("Streams already initialized.")
-        stream_cls.stop_stream(self)
         stream_cls.arm_stream(self)
         self.share = {'lock':threading.Lock()}
         streams = set([])
         for port in self.active_ports:
-            streams.add(stream_cls.STREAM(self,port,self.share))
+            streams.add(stream_cls._STREAM(self,port,self.share))
         for stream in streams:
             stream.start()
         self._streams = streams
@@ -1655,10 +1669,13 @@ class _streaming(object):
             for stream in streams: stream.join()
             self._streams = None
         stream_cls.deinit_stream(self)
-    def _arm_eth(self):    self.streaming_arm(   _streaming)
-    def _store_eth(self):  self.streaming_store( _streaming)
-    def _deinit_eth(self): self.streaming_deinit(_streaming)
-
+    @property
+    def use_eth(self): return self.setting_stream == 'eth'
+    @property
+    def _eth_streaming_cls(self): return _streaming
+    def _arm_eth(self):    self.streaming_arm(   self._eth_streaming_cls)
+    def _store_eth(self):  self.streaming_store( self._eth_streaming_cls)
+    def _deinit_eth(self): self.streaming_deinit(self._eth_streaming_cls)
 
 class _mgt482(_streaming):
     _mgt = None
@@ -1677,9 +1694,12 @@ class _mgt482(_streaming):
     def get_sites(self,i): return self.mgt[i]._sites
     def get_devid(self,i): return self.mgt[i]._devid
     @property
-    def active_ports(self): return tuple(i for i in range(2) if len(self.get_sites(i))>0)
+    def active_ports(self):
+        if self.use_mgt:
+            return tuple(i for i in range(2) if len(self.get_sites(i))>0)
+        return _streaming.active_ports
     @property
-    def use_mgt(self): return len(self.active_ports)>0
+    def use_mgt(self): return self.setting_stream == 'mgt'
     def _blockgrp(self,i): return len(self.get_sites(i))
     @classmethod
     def get_mgt_sites(cls):
@@ -1688,7 +1708,7 @@ class _mgt482(_streaming):
             for s in l:
                 ai.add(s)
         return tuple(ai)
-    class STREAM(_streaming.STREAM):
+    class _STREAM(_streaming._STREAM):
         _folder = "/data"
         _blks_per_buf = 99
         dostore   = False
@@ -1698,18 +1718,18 @@ class _mgt482(_streaming):
             while not self._ready:
                  time.sleep(1)
         def __init__(self,dev,port,share):
-            super(_mgt482.STREAM,self).__init__(dev,port,share)
-            self.__init_meta__(dev,port,share)
-        def __init_meta__(self,dev,port,share):
-            self.devid = dev.get_devid(port)
-            self.post = dev.setting_post
-            self.blockgrp = dev._blockgrp(port)
+            super(_mgt482._STREAM,self).__init__(dev,port,share)
+        chanlist = None
+        def _init(self):
+            self.devid = self.dev.get_devid(self.port)
+            self.post = self.dev.setting_post
+            self.blockgrp = self.dev._blockgrp(self.port)
             self.grp_per_buf = self._blks_per_buf//self.blockgrp
             self.chanlist = []
             num_channels = 0
-            for s in dev.get_sites(port):
-                off = dev._channel_offset[s-1]
-                num = dev.getmodule(s)._num_channels
+            for s in self.dev.get_sites(self.port):
+                off = self.dev._channel_offset[s-1]
+                num = self.dev.getmodule(s)._num_channels
                 self.chanlist.extend(range(off,off+num))
                 num_channels += num
             self.size = (1<<22) * self.blockgrp     # _blockgrp blocks of 4MB
@@ -1819,12 +1839,13 @@ class _mgt482(_streaming):
             t -= 1
             if t<=0: break
             time.sleep(1)
+    @property
+    def _mgt_streaming_cls(self): return _mgt482
+    def _arm_mgt(self):    self.streaming_arm(   self._mgt_streaming_cls)
+    def _store_mgt(self):  self.streaming_store( self._mgt_streaming_cls)
+    def _deinit_mgt(self): self.streaming_deinit(self._mgt_streaming_cls)
 
-    def _arm_mgt(self):    self.streaming_arm(   _mgt482)
-    def _store_mgt(self):  self.streaming_store( _mgt482)
-    def _deinit_mgt(self): self.streaming_deinit(_mgt482)
-
-class _carrier(_dtacq):
+class _carrier(_dtacq,_streaming):
     """
     Class that can set the various knobs (PVs) of the D-TACQ module. PVs are set from the user tree-knobs.
     """
@@ -1943,7 +1964,6 @@ class _carrier(_dtacq):
             for k in self.nc._exclude:
                 if k in c: del(c[k])
         self.commands = json.dumps(dic)
-
     def _init(self):
         """ initialize all device settings """
         ext = self.is_ext_clk
@@ -1961,6 +1981,8 @@ class _carrier(_dtacq):
         if debug: dprint('Device is initialized with modules %s'%str(self._active_mods))
     def _arm_acq(self,timeout=50):
         """ arm the device for acq modules """
+        if self.use_eth:
+            return self._arm_eth()
         timeout = int(timeout)
         return self.nc.wait4arm(timeout)
     def _arm_ao(self,data={},rearm=False):
@@ -1968,7 +1990,8 @@ class _carrier(_dtacq):
         for i in self._active_mods:
             self.getmodule(i).arm(data.get(i,{}),rearm=rearm)
     def _store_acq(self,abort=False):
-        if debug: dprint('store_bulk')
+        if self.use_eth:
+            return self._store_eth()
         for site in self._active_mods:
             self.getmodule(site).store()
         self._master.store_master()
@@ -1992,6 +2015,10 @@ class _carrier(_dtacq):
         else:
             self._transfer_raw()
         return True
+    def _deinit_acq(self):
+        if self.use_eth:
+            return self._deinit_eth()
+        self.nc.wait4abort(30)
     @property
     def data_scales(self): return numpy.concatenate([self.getmodule(i).data_scales  for i in self.modules])
     @property
@@ -2120,9 +2147,6 @@ class _carrier(_dtacq):
         dims_slice = [self._get_dim_slice(0,self.get_dt(),0,dlen,pre)]
         self._store_channels_from_queue(dims_slice,queue)
         for t in threads: t.join()
-    def _deinit_acq(self):
-        """ abort and go to idle """
-        self.nc.wait4abort(30)
 
 
 class _acq1001(_carrier,_streaming):
@@ -2130,7 +2154,8 @@ class _acq1001(_carrier,_streaming):
     To be used for items specific to the ACQ2106 carrier
     """
     _nc_class = acq1001
-    _demux = 1
+    @property
+    def _demux(self): return 0 if self.use_eth else 1
 
 class _acq2106(_carrier,_mgt482):
     """
@@ -2138,22 +2163,19 @@ class _acq2106(_carrier,_mgt482):
     """
     _nc_class = acq2106
     @property
-    def _demux(self): return 0 if self.use_mgt else 1
+    def _demux(self): return 0 if self.use_mgt or self.use_eth else 1
     def _arm_acq(self,*a,**kw):
         if self.use_mgt:
-            self._arm_mgt(*a,**kw)
-        else:
-            super(_acq2106,self)._arm_acq(*a,**kw)
+            return self._arm_mgt(*a,**kw)
+        super(_acq2106,self)._arm_acq(*a,**kw)
     def _store_acq(self,*a,**kw):
         if self.use_mgt:
-            self._store_mgt(*a,**kw)
-        else:
-            super(_acq2106,self)._store_acq(*a,**kw)
+            return self._store_mgt(*a,**kw)
+        super(_acq2106,self)._store_acq(*a,**kw)
     def _deinit_acq(self,*a,**kw):
         if self.use_mgt:
-            self._deinit_mgt(*a,**kw)
-        else:
-            super(_acq2106,self)._deinit_acq(*a,**kw)
+            return self._deinit_mgt(*a,**kw)
+        super(_acq2106,self)._deinit_acq(*a,**kw)
     def calc_Mclk(self,clk,maxi,mini,decim):
         """
         Calculates the Mclk based off the user-specified clock, and the available filter decim values.
@@ -2420,7 +2442,7 @@ class acq2106_acq480x6(_acq2106):pass
 acq2106_acq480x6.setup(_acq480,6)
 
 
-def test_without_mds():
+def test_without_mds(mode="off"):
     ai,ao = None,None
     try:
         post = (1<<15)*10
@@ -2430,6 +2452,7 @@ def test_without_mds():
         ao=acq1001_ao420('192.168.44.254')
         #ai=acq2106_acq480x1('192.168.44.255')
         ai=acq2106_acq425x2('192.168.44.255')
+        ai.setting_stream = mode
         ai.init_mgt(A=[1])
         ao.init(post=post,clock=1000000)
         ai.init(pre=0,post=1000000,clock=1e6)
@@ -2480,10 +2503,20 @@ else:
 ### Private MDSplus Devices
 ###------------------------
  class _STREAMING(_streaming):
-    class STREAM(_streaming.STREAM):
+    @property
+    def _eth_streaming_cls(self): return _STREAMING
+    class _STREAM(_streaming._STREAM):
         def __init__(self,dev,port,share,name=None):
-            _streaming.STREAM.__init__(self,dev,port,share,name)
+            _streaming._STREAM.__init__(self,dev,port,share,name)
             self.dev = self.dev.copy()
+        def store(self,i0,block):
+            i1 = self.dev.get_i1(i0,block.shape[1])
+            dim,dm0,dm1 = self.dev.get_dim_set(i0,i1)
+            for i,idx in enumerate(self.chanlist):
+                ch = idx+1
+                raw = self.dev.getchannel(ch)
+                if not raw.on: continue
+                raw.makeSegment(dm0,dm1,dim,block[i])
     def streaming_store(self,stream_cls):
         try: stream_cls.stop_stream(self)
         except: pass
@@ -2531,25 +2564,26 @@ else:
         return MDSplus.ADD(MDSplus.MULTIPLY(MDSplus.dVALUE(),slope),offset)
 
  class _MGT482(_STREAMING,_MDS_EXPRESSIONS,_mgt482):
+    @property
+    def _mgt_streaming_cls(self): return _MGT482
     parts = [
-      {'path': '.MGT',             'type': 'structure', 'options': ('no_write_shot',)},
-      {'path': '.MGT.A',           'type': 'structure', 'options': ('no_write_shot',)},
-      {'path': '.MGT.A:SITES',     'type': 'numeric',   'options': ('no_write_shot',), 'help':'Sites streamed via lane A'},
-      {'path': '.MGT.A:DEVICE_ID', 'type': 'numeric', 'valueExpr':'Int32(0)', 'options': ('no_write_shot','write_once'), 'help':"Host's device id for lane A"},
-      {'path': '.MGT.B',           'type': 'structure', 'options': ('no_write_shot',)},
-      {'path': '.MGT.B:SITES',     'type': 'numeric',   'options': ('no_write_shot',), 'help':'Sites streamed via lane B'},
-      {'path': '.MGT.B:DEVICE_ID', 'type': 'numeric', 'valueExpr':'Int32(1)', 'options': ('no_write_shot','write_once'), 'help':"Host's device id for lane B"},
+      {'path': ':STREAM.MGT_A',           'type': 'structure', 'options': ('no_write_shot',)},
+      {'path': ':STREAM.MGT_A:SITES',     'type': 'numeric',   'options': ('no_write_shot',), 'help':'Sites streamed via lane A'},
+      {'path': ':STREAM.MGT_A:DEVICE_ID', 'type': 'numeric', 'valueExpr':'Int32(0)', 'options': ('no_write_shot','write_once'), 'help':"Host's device id for lane A"},
+      {'path': ':STREAM.MGT_B',           'type': 'structure', 'options': ('no_write_shot',)},
+      {'path': ':STREAM.MGT_B:SITES',     'type': 'numeric',   'options': ('no_write_shot',), 'help':'Sites streamed via lane B'},
+      {'path': ':STREAM.MGT_B:DEVICE_ID', 'type': 'numeric', 'valueExpr':'Int32(1)', 'options': ('no_write_shot','write_once'), 'help':"Host's device id for lane B"},
     ]
-    _mgt_a_sites = mdsrecord('mgt_a_sites',tuple,tuple())
-    _mgt_b_sites = mdsrecord('mgt_b_sites',tuple,tuple())
-    _mgt_a_device_id = mdsrecord('mgt_a_device_id',int,0)
-    _mgt_b_device_id = mdsrecord('mgt_b_device_id',int,1)
-    def get_sites(self,i): return self._mgt_a_sites if i==0 else self._mgt_b_sites
-    def get_devid(self,i): return self._mgt_a_device_id if i==0 else self._mgt_b_device_id
-    class STREAM(_STREAMING.STREAM,_mgt482.STREAM):
+    _stream_mgt_a_sites = mdsrecord('stream_mgt_a_sites',tuple,tuple())
+    _stream_mgt_b_sites = mdsrecord('stream_mgt_b_sites',tuple,tuple())
+    _stream_mgt_a_device_id = mdsrecord('stream_mgt_a_device_id',int,0)
+    _stream_mgt_b_device_id = mdsrecord('stream_mgt_b_device_id',int,1)
+    def get_sites(self,i): return self._stream_mgt_a_sites     if i==0 else self._stream_mgt_b_sites
+    def get_devid(self,i): return self._stream_mgt_a_device_id if i==0 else self._stream_mgt_b_device_id
+    class _STREAM(_STREAMING._STREAM,_mgt482._STREAM):
         def __init__(self,dev,port,share):
-            super(_MGT482.STREAM,self).__init__(dev,port,share)
-            _mgt482.STREAM.__init_meta__(self,dev,port,share)
+            super(_MGT482._STREAM,self).__init__(dev,port,share)
+        def _init(self): _mgt482._STREAM._init(self)
         def store(self,i0,block):
             i1 = self.dev.get_i1(i0,block.shape[1])
             dim,dm0,dm1 = self.dev.get_dim_set(i0,i1)
@@ -2584,6 +2618,7 @@ else:
       {'path': ':ACTIONSERVER:REBOOT',         'type': 'TASK',    'options':('write_once',), 'valueExpr':'Method(None,"reboot",head)'},
       {'path': ':COMMENT',        'type': 'text'},
       {'path': ':HOST',           'type': 'text',     'value': 'localhost',   'options': ('no_write_shot',)}, # hostname or ip address
+      {'path': ':STREAM',         'type': 'text',     'value': 'off',         'options': ('no_write_shot',), 'help':'Stream Mode: OFF,ETH,MGT'},
       {'path': ':TRIGGER',        'type': 'numeric',  'valueExpr':'Int64(0)', 'options': ('no_write_shot',)},
       {'path': ':TRIGGER:EDGE',   'type': 'text',     'value': 'rising',      'options': ('no_write_shot',)},
       {'path': ':CLOCK_SRC',      'type': 'numeric',  'valueExpr':'head.clock_src_zclk','options': ('no_write_shot',), 'help':"reference to ZCLK or set FPCLK in Hz"},
@@ -2643,6 +2678,7 @@ else:
         return self.__host
     @property
     def setting_shot(self): return self.tree.shot
+    setting_stream    = mdsrecord('stream',lambda x: str(x).lower(),'off')
     setting_clock_src = mdsrecord('clock_src',int)
     setting_clock     = mdsrecord('clock',int)
     setting_trigger   = mdsrecord('trigger',int)
@@ -2682,11 +2718,14 @@ else:
         """
         ACTION METHOD: arm the device for acq modules
         """
-        try:
-            if not _carrier._arm_acq(self,timeout):
-                raise MDSplus.MDSplusERROR('not armed after %d seconds'%timeout)
+        try: _carrier._arm_acq(self,timeout)
         except socket.error as e:
             raise MDSplus.DevOFFLINE(str(e))
+        except (SystemExit,KeyboardInterrupt): raise
+        except:
+            import traceback
+            traceback.print_exc()
+            raise MDSplus.MDSplusERROR('not armed after %d seconds'%timeout)
 
     def _arm_ao(self):
         """
@@ -2697,16 +2736,15 @@ else:
             raise MDSplus.DevOFFLINE(str(e))
 
     def _store_acq(self,abort=False):
-        try:
-            if not _carrier._store_acq(self,abort):
-                raise MDSplus.DevNOT_TRIGGERED
+        try: _carrier._store_acq(self,abort)
         except socket.error as e:
             raise MDSplus.DevOFFLINE(str(e))
         except (SystemExit,KeyboardInterrupt): raise
         except Exception as e:
             import traceback
             traceback.print_exc()
-            raise
+            raise MDSplus.DevNOT_TRIGGERED
+
 
     def _get_dim_slice(self,i0,start,end,pre,mcdf=1):
         """ calculates the time-vector based on clk-tick t0, dt in ns, start and end """
@@ -2746,30 +2784,27 @@ else:
         except socket.error as e:
             raise MDSplus.DevOFFLINE(str(e))
 
- class _ACQ1001(_CARRIER,_acq1001): pass
+ class _ACQ1001(_CARRIER,_STREAMING,_acq1001): pass
  class _ACQ2106(_CARRIER,_MGT482,_acq2106):
     parts = _CARRIER.parts + _MGT482.parts
     def init(self):
         """
         ACTION METHOD: initialize all device settings
         """
-        self.init_mgt(self._mgt_a_sites,self._mgt_b_sites,self._mgt_a_device_id,self._mgt_b_device_id)
+        self.init_mgt(self._stream_mgt_a_sites,self._stream_mgt_b_sites,self._stream_mgt_a_device_id,self._stream_mgt_b_device_id)
         super(_ACQ2106,self).init()
     def _arm_acq(self,*a,**kw):
         if self.use_mgt:
-            self._arm_mgt(*a,**kw)
-        else:
-            super(_ACQ2106,self)._arm_acq(*a,**kw)
+            return self._arm_mgt(*a,**kw)
+        return super(_ACQ2106,self)._arm_acq(*a,**kw)
     def _store_acq(self,*a,**kw):
         if self.use_mgt:
-            self._store_mgt(*a,**kw)
-        else:
-            super(_ACQ2106,self)._store_acq(*a,**kw)
+            return self._store_mgt(*a,**kw)
+        return super(_ACQ2106,self)._store_acq(*a,**kw)
     def _deinit_acq(self,*a,**kw):
         if self.use_mgt:
-            self._deinit_mgt(*a,**kw)
-        else:
-            super(_ACQ2106,self)._deinit_acq(*a,**kw)
+            return self._deinit_mgt(*a,**kw)
+        return super(_ACQ2106,self)._deinit_acq(*a,**kw)
  class _MODULE(MDSplus.TreeNode,_module):
     """
     MDSplus-dependent superclass covering Gen.4 D-tAcq module device types. PVs are set from the user tree-knobs.
@@ -3034,11 +3069,11 @@ else:
         return self._MGTDRAM__stream.get(self.id,None)
     @_stream.setter
     def _stream(self,value):
-        if   isinstance(value,(_MGTDRAM.STREAM,)):
+        if   isinstance(value,(_MGTDRAM._STREAM,)):
             self._MGTDRAM__stream[self.id] = value
         elif self.id in self._MGTDRAM__stream:
             self._MGTDRAM__stream.pop(self.id)
-    class STREAM(threading.Thread):
+    class _STREAM(threading.Thread):
         _folder = '/home/dt100/data'
         _blksize = (1<<22) # blocks of 4MB
         traceback = None
@@ -3063,7 +3098,7 @@ else:
             with self._state_lock:
                 return self._state
         def __init__(self,dev,blocks,autostart=True):
-            super(_MGTDRAM.STREAM,self).__init__(name="MGTDRAM.STREAM(%s)"%id)
+            super(_MGTDRAM._STREAM,self).__init__(name="MGTDRAM.STREAM(%s)"%id)
             self._stop = threading.Event()
             self.id  = dev.node_name.lower()
             self.ctrl= dev.nc
@@ -3278,7 +3313,7 @@ else:
 
     def fits_in_ram(self):
         chans   = self._num_channels
-        length  = self.STREAM._blksize//self._num_channels//2
+        length  = self._STREAM._blksize//self._num_channels//2
         samples = self._post+self._pre
         blocks  = samples//length + (1 if (samples%length)>0 else 0)
         does = blocks<128 # have enought space for demux 128-1
@@ -3288,7 +3323,7 @@ else:
         if does: return self._arm_acq()
         if debug: dprint('_MGTDRAM._arm_mgt')
         if self._stream is None:
-            self._stream = self.STREAM(self,blocks)
+            self._stream = self._STREAM(self,blocks)
         if not self._stream.wait4armed():
             self._stream = None
             raise Exception('Stream terminated')
@@ -3357,7 +3392,6 @@ else:
     acq1001_420_host     = '192.168.44.254' #'acq1001_291'
     acq1001_425_host     = '192.168.44.255'
     acq1001_480_host     = '192.168.44.255' #'acq1001_316'
-    rp_host              = '10.44.2.100'#'RP-F0432C'
     shot = 1000
     @classmethod
     def getShotNumber(cls):
@@ -3373,58 +3407,52 @@ else:
         cls.shot = cls.getShotNumber()
         MDSplus.setenv('test_path','/tmp')
         with MDSplus.Tree('test',-1,'new') as t:
-            #ACQ480=ACQ2106_ACQ480x4.Add(t,'ACQ480')
             A=ACQ2106_ACQ480x4.Add(t,'ACQ480x4')
             A.host      = cls.acq2106_480_host
-            #A.clock_src = 10000000
             A.clock     =  2000000
             A.trigger_pre  = 0
             A.trigger_post = 100000
             A.module1_fir  = 3
             A.ACTIONSERVER.SOFT_TRIGGER.on = True
             A=ACQ2106_ACQ480x4.Add(t,'ACQ480x4_M2')
-            A.mgt_a_sites = MDSplus.Int32([1,2])
-            A.mgt_b_sites = MDSplus.Int32([3,4])
+            A.stream_mgt_a_sites = MDSplus.Int32([1,2])
+            A.stream_mgt_b_sites = MDSplus.Int32([3,4])
             A.host      = cls.acq2106_480_host
-            #A.clock_src = 10000000
             A.clock     =  2000000
             A.trigger_pre  = 0
             A.trigger_post = 500000
             A.module1_fir  = 3
             A.ACTIONSERVER.SOFT_TRIGGER.on = True
             A=ACQ2106_ACQ425x2.Add(t,'ACQ425x2')
+            A.stream = 'ETH'
             A.host      = cls.acq2106_425_host
-            #A.clock_src = 10000000
-            A.clock     = 1000000
+            A.clock     = 100000
             A.trigger_pre  = 0
             A.trigger_post = 100000
             A.ACTIONSERVER.SOFT_TRIGGER.on = True
             A=ACQ2106_ACQ425x2.Add(t,'ACQ425x2_M2')
-            A.mgt_a_sites = MDSplus.Int32([1])
-            A.mgt_b_sites = MDSplus.Int32([2])
+            A.stream = 'MGT'
+            A.stream_mgt_a_sites = MDSplus.Int32([1])
+            A.stream_mgt_b_sites = MDSplus.Int32([2])
             A.host      = cls.acq2106_425_host
-            #A.clock_src = 10000000
             A.clock     = 1000000
             A.trigger_pre  = 0
             A.trigger_post = 500000
             A.ACTIONSERVER.SOFT_TRIGGER.on = True
             A=ACQ1001_ACQ425.Add(t,'ACQ425')
             A.host      = cls.acq1001_425_host
-            #A.clock_src = 10000000
             A.clock     = 1000000
             A.trigger_pre  = 0
             A.trigger_post = 100000
             A.ACTIONSERVER.SOFT_TRIGGER.on = True
             A=ACQ1001_ACQ480.Add(t,'ACQ480')
             A.host      = cls.acq1001_480_host
-            #A.clock_src = 10000000
             A.clock     = 2000000
             A.trigger_pre  = 0
             A.trigger_post = 100000
             A.ACTIONSERVER.SOFT_TRIGGER.on = True
             A=ACQ1001_AO420.Add(t,'AO420')
             A.host      = cls.acq1001_420_host
-            #A.clock_src = 10000000
             A.clock     = 1000000
             a = numpy.array(range(100000))/50000.*numpy.pi
             A.getchannel(1).record=numpy.sin(a)
@@ -3432,8 +3460,6 @@ else:
             A.getchannel(3).record=-numpy.sin(a)
             A.getchannel(4).record=-numpy.cos(a)
             A.ACTIONSERVER.SOFT_TRIGGER.on = True
-            #R=w7x_timing.W7X_TIMING.Add(t,'R')
-            #R.host           = cls.rp_host
             t.write()
         t.cleanDatafile()
 
@@ -3447,29 +3473,18 @@ else:
         t=MDSplus.Tree('test',shot)
         A=t.getNode(dev)
         A.simulate = Tests.simulate
-        try:
-            R = t.R
-        except AttributeError:
-            R=None
         A.debug=7
         out('setup trigger')
-        if R is not None:
-            R.disarm()
-            R.init()
-            R.arm()
         out('init A')
         A.init()
         out('arm A')
         A.arm()
         try:
-            out('wait 2sec ')
+            out('wait 2sec')
             time.sleep(2)
-            out('TRIGGER! ')
-            if R is None:
-                A.soft_trigger()
-            else:
-                R.trig();
-            t=int(A.setting_post/A.setting_clock+1)*2
+            out('TRIGGER!')
+            A.soft_trigger()
+            t=int(A.setting_post/A.setting_clock+2)*1
             out('wait %dsec'%t)
             time.sleep(t)
             if dev.startswith('ACQ'):
@@ -3483,65 +3498,43 @@ else:
     def test420Normal(self):
         out('start test420Normal',1)
         t=MDSplus.Tree('test')
-        try: R = t.R
-        except AttributeError: pass
-        else: R.setup()
         self.makeshot(t,self.shot+8,'AO420')
 
     def test425Normal(self):
         out('start test425Normal',1)
         t=MDSplus.Tree('test')
-        try: R = t.R
-        except AttributeError: pass
-        else: R.setup()
         self.makeshot(t,self.shot+5,'ACQ425')
 
     def test425X2Normal(self):
         out('start test425X2Normal',1)
         t=MDSplus.Tree('test')
-        try: R = t.R
-        except AttributeError: pass
-        else: R.setup()
         self.makeshot(t,self.shot+6,'ACQ425X2')
 
     def test425X2Stream(self):
         out('start test425X2Stream',1)
         t=MDSplus.Tree('test')
-        try: R = t.R
-        except AttributeError: pass
-        else: R.setup()
         self.makeshot(t,self.shot+7,'ACQ425X2_M2')
 
     def test480Normal(self):
         out('start test480Normal',1)
         t=MDSplus.Tree('test')
-        try: R = t.R
-        except AttributeError: pass
-        else: R.setup()
         self.makeshot(t,self.shot+5,'ACQ480')
 
     def test480X4Normal(self):
         out('start test480X4Normal',1)
         t=MDSplus.Tree('test')
-        try: R = t.R
-        except AttributeError: pass
-        else: R.setup(width=1000)
         t.ACQ480X4.module1_trig_mode='OFF';
         self.makeshot(t,self.shot+1,'ACQ480X4')
 
     def test480X4RGM(self):
         out('start test480X4RGM',1)
         t=MDSplus.Tree('test')
-        t.R.setup(width=1000,gate2=range(3),timing=[i*(t.ACQ480X4.trigger_post>>4)*self.acq2106_480_fpgadecim for i in [0,1,2,4,5,8,9,13,14,19,20,100]])
         t.ACQ480X4.module1_trig_mode='RGM';
         self.makeshot(t,self.shot+2,'ACQ480X4')
 
     def test480X4RTM(self):
         out('start test480X4RTM',1)
         t=MDSplus.Tree('test')
-        try: R = t.R
-        except AttributeError: pass
-        else: R.setup(width=100,period=100000*self.acq2106_480_fpgadecim,burst=30)
         t.ACQ480X4.module1_trig_mode='RTM'
         t.ACQ480X4.module1_trig_mode_translen=t.ACQ480X4.trigger_post>>3
         self.makeshot(t,self.shot+3,'ACQ480X4')
@@ -3549,11 +3542,7 @@ else:
     def test480X4Stream(self):
         out('start test480X4MGT',1)
         t=MDSplus.Tree('test')
-        #t.ACQ2106_064.trigger_post=12500000
-        try: R = t.R
-        except AttributeError: pass
-        else: R.setup(width=100)
-        t.ACQ2106_064.module1_trig_mode='OFF';
+        t.ACQ480X4_M2.module1_trig_mode='OFF';
         self.makeshot(t,self.shot+1,'ACQ480X4_M2')
 
     def runTest(self):
