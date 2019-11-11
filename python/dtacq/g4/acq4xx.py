@@ -3382,14 +3382,13 @@ else:
 
     @classmethod
     def setUpClass(cls):
-        from LocalDevices import acq4xx as a#,w7x_timing
         import gc
         gc.collect(2)
         cls.shot = cls.getShotNumber()
         MDSplus.setenv('test_path','/tmp')
         with MDSplus.Tree('test',-1,'new') as t:
             #ACQ480=ACQ2106_ACQ480x4.Add(t,'ACQ480')
-            A=a.ACQ2106_ACQ480x4.Add(t,'ACQ480x4')
+            A=ACQ2106_ACQ480x4.Add(t,'ACQ480x4')
             A.host      = cls.acq2106_480_host
             #A.clock_src = 10000000
             A.clock     =  2000000
@@ -3397,7 +3396,7 @@ else:
             A.trigger_post = 100000
             A.module1_fir  = 3
             A.ACTIONSERVER.SOFT_TRIGGER.on = True
-            A=a.ACQ2106_ACQ480x4.Add(t,'ACQ480x4_M2')
+            A=ACQ2106_ACQ480x4.Add(t,'ACQ480x4_M2')
             A.mgt_a_sites = MDSplus.Int32([1,2])
             A.mgt_b_sites = MDSplus.Int32([3,4])
             A.host      = cls.acq2106_480_host
@@ -3407,14 +3406,14 @@ else:
             A.trigger_post = 500000
             A.module1_fir  = 3
             A.ACTIONSERVER.SOFT_TRIGGER.on = True
-            A=a.ACQ2106_ACQ425x2.Add(t,'ACQ425x2')
+            A=ACQ2106_ACQ425x2.Add(t,'ACQ425x2')
             A.host      = cls.acq2106_425_host
             #A.clock_src = 10000000
             A.clock     = 1000000
             A.trigger_pre  = 0
             A.trigger_post = 100000
             A.ACTIONSERVER.SOFT_TRIGGER.on = True
-            A=a.ACQ2106_ACQ425x2.Add(t,'ACQ425x2_M2')
+            A=ACQ2106_ACQ425x2.Add(t,'ACQ425x2_M2')
             A.mgt_a_sites = MDSplus.Int32([1])
             A.mgt_b_sites = MDSplus.Int32([2])
             A.host      = cls.acq2106_425_host
@@ -3423,21 +3422,21 @@ else:
             A.trigger_pre  = 0
             A.trigger_post = 500000
             A.ACTIONSERVER.SOFT_TRIGGER.on = True
-            A=a.ACQ1001_ACQ425.Add(t,'ACQ425')
+            A=ACQ1001_ACQ425.Add(t,'ACQ425')
             A.host      = cls.acq1001_425_host
             #A.clock_src = 10000000
             A.clock     = 1000000
             A.trigger_pre  = 0
             A.trigger_post = 100000
             A.ACTIONSERVER.SOFT_TRIGGER.on = True
-            A=a.ACQ1001_ACQ480.Add(t,'ACQ480')
+            A=ACQ1001_ACQ480.Add(t,'ACQ480')
             A.host      = cls.acq1001_480_host
             #A.clock_src = 10000000
             A.clock     = 2000000
             A.trigger_pre  = 0
             A.trigger_post = 100000
             A.ACTIONSERVER.SOFT_TRIGGER.on = True
-            A=a.ACQ1001_AO420.Add(t,'AO420')
+            A=ACQ1001_AO420.Add(t,'AO420')
             A.host      = cls.acq1001_420_host
             #A.clock_src = 10000000
             A.clock     = 1000000
@@ -3588,20 +3587,15 @@ else:
         return ['test420Normal']
 
 
- def suite(tests):
-    return TestSuite(map(Tests,tests))
+ def suite(tests): return TestSuite(map(Tests,tests))
 
- def run480():
-    TextTestRunner(verbosity=2).run(suite(Tests.get480Tests()))
+ def runTests(tests): TextTestRunner(verbosity=2).run(suite(tests))
 
- def run425():
-    TextTestRunner(verbosity=2).run(suite(Tests.get425Tests()))
+ def run480(): runTests(Tests.get480Tests())
 
- def run420():
-    TextTestRunner(verbosity=2).run(suite(Tests.get420Tests()))
+ def run425(): runTests(Tests.get425Tests())
 
- def runTests(tests):
-    TextTestRunner(verbosity=2).run(suite(tests))
+ def run420(): runTests(Tests.get420Tests())
 
  def runmgtdram(blocks=10,uut='localhost'):
     blocks = int(blocks)
@@ -3628,55 +3622,7 @@ else:
             if len(sys.argv)>2:
                 runTests(sys.argv[2:])
             else:
-                shot = 1
-                try:    shot>0 # analysis:ignore
-                except: shot = Tests.getShotNumber()
-                from matplotlib.pyplot import plot # analysis:ignore
-
-                #expt,dev=('qmb','ACQ1001_292') # ACQ1001_ACQ480
-                #expt,dev=('qxt1','ACQ2106_070') # ACQ2106_ACQ425x6
-                expt,dev=('qoc','ACQ2106_065') # ACQ2106_ACQ480x4
-                #expt,dev=('qmr1','ACQ2106_068') # ACQ2106_ACQ480x4
-                #for expt,dev in [('qmb','ACQ1001_072'),('qxt1','ACQ2106_070'),('qoc','ACQ2106_064')]:
-                try:
-                    def force(node,val):
-                        node.no_write_shot = False
-                        node.write_once = False
-                        node.record = val
-                    print(dev)
-                    MDSplus.Tree(expt).createPulse(shot)
-                    t=MDSplus.Tree(expt,shot)
-                    A=t.HARDWARE.getNode(dev)
-                    if dev.startswith('ACQ2106'):
-                        force(A.MODULE1.TRIG_MODE, 'TRANSIENT')
-                    if A.MODULE1.record == '_ACQ480':
-                        force(A.CLOCK,20000000)
-                    R = t.HARDWARE.RPTRIG.com
-                    R.disarm()
-                    R.gate([])
-                    R.gate2([])
-                    R.invert([])
-                    print(R.makeSequence(0))
-                    R.arm()
-                    print('RP ready')
-                    force(A.TRIGGER.POST,int(1e7))
-                    A.init()
-                    print('ACQ initialized')
-                    A.arm()
-                    print('ACQ armed, wait 2 sec')
-                    try:
-                        time.sleep(2)
-                        R.trig()
-                        print('RP fired, wait 5 sec')
-                        time.sleep(5)
-                        print('ACQ storing')
-                        A.store()
-                    finally:
-                        A.deinit()
-                        print('M1C1: ssegse= %d'%A.getchannel(1).getNumSegments())
-                except:
-                     import traceback
-                     traceback.print_exc()
+                print("No test methods specified")
         elif sys.argv[1]=='test480':
             run480()
         elif sys.argv[1]=='test425':
