@@ -849,7 +849,6 @@ class site_knobs(dtacq_knobs):
     PART_NUM     = _property_str('PART_NUM',1)
 
 class module_knobs(site_knobs):
-    simulate  = _property_bool('simulate')
     clkdiv    = _property_int('clkdiv')
     CLK       = _property_str('CLK',doc='1 for external, 0 for internal')
     CLK_DX    = _property_str('CLK:DX',doc='d0 through d7')
@@ -910,15 +909,17 @@ class module_knobs(site_knobs):
         value = tuple(str(e) for e in value[:3])
         #self('RGM %s\nRGM:DX %s\nRGM:SENSE %s'%value)
         self('rgm %s,%s,%s'%value) # captized version is not shared
-    RTM_TRANSLEN = _property_int('RTM_TRANSLEN',doc='samples per trigger in RTM; should fill N buffers')
 
 class acq4xx_knobs(module_knobs):
+    rtm_translen = _property_int('rtm_translen',doc='samples per trigger in RTM; should fill N buffers')
+    simulate     = _property_bool('simulate')
     es_enable    = _property_int('es_enable',0,'data will include an event sample')
     class SIG(module_knobs.SIG):pass
     class AI(_property_grp):
         class CAL(_property_cnt):
             ESLO = _property_list_f('ESLO')
             EOFF = _property_list_f('EOFF')
+    RTM_TRANSLEN = _property_int('RTM_TRANSLEN',doc='samples per trigger in RTM; should fill N buffers')
 
 class acq425_knobs(acq4xx_knobs):
     MAX_KHZ = _property_int('MAX_KHZ',1)
@@ -2296,7 +2297,7 @@ class _acq425(_acq4xx):
     def store_master(self):pass
 _acq425.setup()
 
-class _acq480(_module):
+class _acq480(_acq4xx):
     """
     D-tAcq ACQ480 8 channel transient recorder
     http://www.d-tacq.com/modproducts.shtml
