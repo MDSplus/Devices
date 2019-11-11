@@ -1394,14 +1394,11 @@ class ao420(module,ao420_knobs):
             sha1sum = sock.recv(40)
         finally:
             sock.close()
-        print(sha1sum)
-        '''
         if hashlib is not None:
-            sha1sum = hashlib.sha1(bitstring).hexdigest()
-            data = nc((self._server[0],_ao_oneshot_cs)).sock.recv(40)
-            if data != sha1sum:
-                raise Exception('Load Signal failed, checksum mismatch: %s != %s'%(data,sha1sum))
-        '''
+            sha1sum_self = hashlib.sha1(bitstring).hexdigest()
+            print('checksums: %s <> %s'%(sha1sum_self,sha1sum))
+        else:
+            print(sha1sum)
     def _arm(self,s1,s2,s3,s4,rearm=False):
         self.loadSig(self.sigCong(s1,s2,s3,s4),rearm)
     def _init(self,gain,offset,shot=None):
@@ -1616,30 +1613,26 @@ class _streaming(object):
                         self.store(buf,(nchan,samples),'<i2')
             finally:
                 sock.close()
-
-    def arm_stream(self): pass
-    def start_stream(self):
-        self.nc.TRANSIENT() # TODO: necessary? take in TRANSIENT: settings
-        return 0
-    def stop_stream(self):
-        self.nc.CONTINUOUS_stop()
+    def arm_stream(self):    pass
+    def start_stream(self):  self.nc.TRANSIENT()
+    def stop_stream(self):   self.nc.CONTINUOUS_stop()
     def deinit_stream(self): pass
-    def streaming_arm(self):
+    def streaming_arm(self,stream_cls):
         if not self._streams is None: raise Exception("Streams already initialized.")
-        self.stop_stream()
-        self.arm_stream()
+        stream_cls.stop_stream(self)
+        stream_cls.arm_stream(self)
         self.share = {'lock':threading.Lock()}
         streams = set([])
         for port in self.active_ports:
-            streams.add(self.STREAM(self,port,self.share))
+            streams.add(stream_cls.STREAM(self,port,self.share))
         for stream in streams:
             stream.start()
         self._streams = streams
-        self.start_stream()
+        stream_cls.start_stream(self)
     def store_sites(self): pass
     def store_scale(self): pass
-    def streaming_store(self):
-        try: self.stop_stream()
+    def streaming_store(self,stream_cls):
+        try: stream_cls.stop_stream(self)
         except: pass
         self.store_sites()
         if self._streams is None: raise Exception("INV_SETUP")
@@ -1651,17 +1644,21 @@ class _streaming(object):
             for stream in streams: stream.stop()
         for stream in streams: stream.join()
         self._streams = None
-        self.deinit_stream()
+        stream_cls.deinit_stream(self)
         if not triggered: raise Exception("NOT_TRIGGERED")
-    def streaming_deinit(self):
-        try: self.stop_stream()
+    def streaming_deinit(self,stream_cls):
+        try: stream_cls.stop_stream(self)
         except: pass
         if not self._streams is None:
             streams = list(self._streams)
             for stream in streams: stream.stop()
             for stream in streams: stream.join()
             self._streams = None
-        self.deinit_stream()
+        stream_cls.deinit_stream(self)
+    def _arm_eth(self):    self.streaming_arm(   _streaming)
+    def _store_eth(self):  self.streaming_store( _streaming)
+    def _deinit_eth(self): self.streaming_deinit(_streaming)
+
 
 class _mgt482(_streaming):
     _mgt = None
@@ -1823,9 +1820,9 @@ class _mgt482(_streaming):
             if t<=0: break
             time.sleep(1)
 
-    def _arm_mgt(self):    self.streaming_arm()
-    def _store_mgt(self):  self.streaming_store()
-    def _deinit_mgt(self): self.streaming_deinit()
+    def _arm_mgt(self):    self.streaming_arm(   _mgt482)
+    def _store_mgt(self):  self.streaming_store( _mgt482)
+    def _deinit_mgt(self): self.streaming_deinit(_mgt482)
 
 class _carrier(_dtacq):
     """
@@ -1853,9 +1850,6 @@ class _carrier(_dtacq):
     _nc_class = carrier
     @property
     def nc(self):
-        """
-        Serves at the nc socket interface to the carrier/modules (lower-case classes)
-        """
         if self._nc is None:
             self._nc = self._nc_class(self.setting_host)
         return self._nc
@@ -2131,7 +2125,7 @@ class _carrier(_dtacq):
         self.nc.wait4abort(30)
 
 
-class _acq1001(_carrier):
+class _acq1001(_carrier,_streaming):
     """
     To be used for items specific to the ACQ2106 carrier
     """
@@ -2189,7 +2183,6 @@ class _module(_dtacq):
     """
     MDSplus-dependent superclass covering Gen.4 D-tAcq module device types. PVs are set from the user tree-knobs.
     """
-    _nc = None
     _nc_class = module
     _clkdiv_fpga = 1
     _skip = 0
@@ -2211,41 +2204,28 @@ class _module(_dtacq):
         self.parent = parent
         self.site = site
         self._init_done = True
+    @property
+    def nc(self):
+        if self._nc is None:
+            self._nc = self._nc_class(self.setting_host,self.site)
+        return self._nc
     def getchannel(self,ch,*suffix):
         chan = getattr(self,"channel%02d"%ch)
         if len(suffix)==0: return chan
         return getattr(chan,'_'.join(suffix))
-    """ Most important stuff at the top """
     @property
     def max_clk(self): return self._max_clk
     @property
     def _default_clock(self): return self.max_clk
     @property
-    def nc(self):
-        """
-        Interfaces directly through the DTACQ nc ports to send commands.
-        """
-        if self._nc is None:
-            self._nc = self._nc_class(self._host,self.site)
-        return self._nc
-    @property
     def is_master(self): return self.site == 1
-    def channel(self,ch,*args):
-        """
-        Helper to get arguments from individual channel subnodes (e.g. channel_c%02d_argument)
-        """
-        return getattr(getattr(self,'channel%02d'%ch),'_'.join((args)))
-    @property
-    def data_scales(self):  return self.nc.data_scales
-    @property
-    def data_offsets(self): return self.nc.data_offsets
     @property
     def _carrier(self): return self.parent # Node that points to host carrier nid
     @property
     def _trigger(self): return self._carrier._trigger
     __host=None
     @property
-    def _host(self):
+    def setting_host(self):
         if self.__host is None: self.__host = self._carrier.setting_host
         return self.__host
     @property
@@ -2253,7 +2233,7 @@ class _module(_dtacq):
     @property
     def setting_pre(self): return int(self._carrier.setting_pre)
     @property
-    def setting_post(self):     return int(self._carrier._post)
+    def setting_post(self): return int(self._carrier._post)
     @property
     def max_clk_in(self): return self.getMB_SET(self.max_clk)
     """ Action methods """
@@ -2262,7 +2242,15 @@ class _module(_dtacq):
     def init_thread(self):
         return threading.Thread(target=self.nc._init,args=self.init_args)
 
-class _acq425(_module):
+class _acq4xx(_module):
+    setting_trig_mode = 0
+    setting_trig_mode_translen = 1048576
+    @property
+    def data_scales(self):  return self.nc.data_scales
+    @property
+    def data_offsets(self): return self.nc.data_offsets
+
+class _acq425(_acq4xx):
     """
     D-tAcq ACQ425ELF 16 channel transient recorder
     http://www.d-tacq.com/modproducts.shtml
@@ -2314,8 +2302,6 @@ class _acq480(_module):
     @property
     def _skip(self):        return self.nc.get_skip()
 
-    setting_trig_mode = 0
-    setting_trig_mode_translen = 1048576
     setting_fir = 0
 
     def getMB_SET(self,clock):
@@ -2498,8 +2484,8 @@ else:
         def __init__(self,dev,port,share,name=None):
             _streaming.STREAM.__init__(self,dev,port,share,name)
             self.dev = self.dev.copy()
-    def streaming_store(self):
-        try: self.stop_stream()
+    def streaming_store(self,stream_cls):
+        try: stream_cls.stop_stream(self)
         except: pass
         self.store_sites()
         if self._streams is None: raise MDSplus.DevINV_SETUP
@@ -2511,7 +2497,7 @@ else:
             for stream in streams: stream.stop()
         for stream in streams: stream.join()
         self._streams = None
-        self.deinit_stream()
+        stream_cls.deinit_stream(self)
         if not triggered: raise MDSplus.DevNOT_TRIGGERED
 
  class _MDS_EXPRESSIONS(object):
@@ -3622,7 +3608,7 @@ else:
             if len(sys.argv)>2:
                 runTests(sys.argv[2:])
             else:
-                print("No test methods specified")
+                ai,ao=test_without_mds()
         elif sys.argv[1]=='test480':
             run480()
         elif sys.argv[1]=='test425':
