@@ -1,10 +1,10 @@
 #!/bin/bash
-echo UUT=$UUT
 if [ -z $UUT ]
 then
  echo "UUT env undefined: e.g. define UUT=192.168.0.100"
  exit 1
 fi
+echo UUT=$UUT
 if ( uname -v | grep Debian )
 then NC="nc -q 1"
 else NC="nc"
@@ -56,10 +56,10 @@ done
 echo slave
 wait %
 echo done
-mgt-arm $ports
-trap "mgt-deinit $ports" EXIT
+/mgt/mgt-arm $ports
+trap "/mgt/mgt-deinit $ports" EXIT
 for port in $ports
-do mgt-stream $port&
+do /mgt/mgt-stream $port&
 done
 for uut in $UUT
 do echo `$NC $uut 4220 <<< "streamtonowhered start"`
@@ -80,4 +80,6 @@ done
 echo streamtonowhered stop
 tree /data | tail -n 10
 df -h /data
-head -c 64 /data/0/000001/0.00|hexdump
+for port in $ports
+do head -c 64 /data/$port/000001/$port.00|hexdump
+done
