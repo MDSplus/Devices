@@ -2072,7 +2072,7 @@ class _carrier(_dtacq):
                 dlen = val.shape[0]
                 for seg,is0 in enumerate(range(0,dlen,chunksize)):
                     is1 = min(is0+chunksize,dlen)-1
-                    i0,i1 = i00+is0,i00+is1
+                    i0,i1 = start+is0,start+is1
                     dim,dm0,dm1 = dimfun(i0,i1),dmx(i0),dmx(i1)
                     if debug>1: dprint("segment (%7.1fms,%7.1fms)"%(dm0/1e6,dm1/1e6))
                     print((node.idx,scale(val[is0]),dm0,dm1,ESLO[ch-1],EOFF[ch-1],dim,val[is0:is1+1].shape))
@@ -2531,7 +2531,7 @@ else:
         return MDSplus.ADD(MDSplus.MULTIPLY(i0,dt),trg)
     @staticmethod
     def update_dmx(dmx,i0):
-        dm0[0][1] = i0
+        dmx[0][1] = i0
     @staticmethod
     def get_i1(i0,length): return i0+length-1
     def get_dim_set(self,i0=None,i1=None,trg=None,clk=None):
@@ -3228,7 +3228,6 @@ else:
 
         def _transfer(self,dev):
             i0 = 0
-            DT = MDSplus.DIVIDE(MDSplus.Int64(1e9),dev.clock)
             dim,dm0,dm1= self.dev.get_dim_set()
             for buf in self.buffer():
                 i1 = self.dev.get_i1(i0,buf.shape[1])
@@ -3269,7 +3268,6 @@ else:
                 if ctx[0] is not None:
                     ctx[0]+= buf.shape[1]-idx-skp
                 return chunks
-            d1 = None
             rem_samples = self.pre+self.post
             for block,buf in enumerate(self.buffer()):
                 chunks = get_chunks(buf)
