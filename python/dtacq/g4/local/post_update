@@ -1,0 +1,274 @@
+#!/bin/sh
+# load carrier configuration
+source /mnt/local/carrier.conf
+HOSTNAME=$(hostname)
+CARMODEL=$(cat /dev/acq400.0.knobs/module_name)
+MODMODEL=$(cat /dev/acq400.1.knobs/module_name)
+MGTMODEL=$(cat /dev/acq400.13.knobs/module_name 2>/dev/null|echo NONE)
+
+package_filenames() {
+cat /mnt/VERSION | grep ./$1/ | awk -F / '{ print $NF }'
+}
+
+cleanup_packages() {
+packages=$(package_filenames packages)
+packages_opt=$(package_filenames packages.opt)
+old=$(pwd)
+cd /mnt/packages
+for p in *
+do
+ found=
+ for o in $packages
+ do if [ "$p" = "$o" ];then found=y;fi
+ done
+ if [ -z $found ] # is not original
+ then
+  for o in $packages_opt
+  do if [ "$p" = "$o" ];then found=y;fi
+  done
+  if [ -z $found ] # is not optional
+  then rm $p
+  else mv $p /mnt/packages.opt/
+  fi
+ fi
+done
+cd $old
+}
+cleanup_personality() {
+[ -f /mnt/ACQ*.bit.gz ]&&rm /mnt/ACQ*.bit.gz
+}
+cleanup_all() {
+cleanup_personality
+cleanup_packages
+}
+
+
+install_personality() {
+if [ ! -z $FPGA ]
+then cp /mnt/fpga.d/$FPGA /mnt/
+fi
+}
+install_optional_packages() {
+for p in $PACKAGES_OPT
+do mv /mnt/packages.opt/*-$p-*.tgz /mnt/packages/
+done
+}
+install_user_packages() {
+cp /mnt/local/packages/* /mnt/packages/
+if [ "${CARMODEL::7}" = "acq2106" ]
+then cp /mnt/local/packages.acq2106/* /mnt/packages/
+fi
+}
+install_all() {
+install_personality
+install_user_packages
+install_optional_packages
+}
+
+setup_acq400() {
+file="/mnt/local/acq420_custom"
+
+KNOBS="#add extra knobs
+link() {
+ ln -sfT /usr/local/bin/ca\${1}_$HOSTNAME\$2 /etc/acq400/\$3/\$4
+}
+link get '' 0 LIVE:MODE
+link put '' 0 SIG:SOFT_TRIGGER
+mkdir /etc/acq400/SIG
+link put '' SIG SIG:SOFT_TRIGGER
+"
+
+for i in `seq 1 6`
+do if [ -d /dev/acq400.$i.knobs ]
+then
+ if [ "${MODMODEL::5}" = "acq48" ]
+ then KNOBS="$KNOBS
+link put :$i $i ACQ480:TRAIN
+link get :$i $i ACQ480:JC:PRESENT
+"
+ fi
+fi
+done
+
+if [ "${MODMODEL::5}" = "ao420" ]
+then
+ DRVR_CUSTOM="'xo_use_distributor=1 default_dma_direction=1 xo_use_bigbuf=1 dio432_rowback=1 data_32b=0'"
+else
+ DRVR_CUSTOM="data_32b=0"
+fi
+
+cat > $file <<EOF
+#$file
+# loads before insmod
+REBOOT_KNOB=y
+BLEN=$BLEN NBUF=$NBUF
+$KNOBS
+DRVR_CUSTOM=$DRVR_CUSTOM
+EOF
+
+file="/mnt/local/sysconfig/acq400.sh"
+cat > $file <<EOF
+#$file
+# loads with /etc/profile
+EOF
+}
+
+setup_bos() {
+file="/mnt/local/sysconfig/bos.sh"
+if [ "${MODMODEL::5}" = "ao420" ]
+then rm -f $file 2>/dev/null
+else
+ bytes_per_sample=2
+ div=$(($NCHAN*$bytes_per_sample))
+ blksamp=$(($BLEN/$div))
+ max=$(($blksamp*($NBUF-1)))
+ cat > $file <<EOF
+#$file
+# loads with /etc/profile
+PREMAX=$max
+POSTMAX=$max
+EOF
+fi
+}
+
+setup_epics() {
+file="/mnt/local/sysconfig/epics.sh"
+if [ "${CARMODEL::7}" = "acq2106" ]
+then STREAM_OPTS='
+echo "--null-copy" >/etc/acq400/0/STREAM_OPTS'
+else STREAM_OPTS=
+fi
+
+
+cat > $file <<EOF
+#$file
+# loads before creating EPICS db
+echo "-1" >/etc/acq400/0/OVERSAMPLING$STREAM_OPTS
+export EPICS_CA_MAX_ARRAY_BYTES=500000
+export IOC_POSTINIT=/mnt/local/sysconfig/set_dt_test_role
+EOF
+}
+
+setup_reset_sites() {
+file="/mnt/local/sysconfig/reset_sites"
+cat > $file <<EOF
+#$file
+map /usr/local/acq1002.map
+mm \$s1+4 305
+mm \$s1+4 315
+mm \$s2+4 205
+mm \$s2+4 215
+EOF
+}
+
+setup_site1peers() {
+file="/mnt/local/sysconfig/site-1-peers"
+src() {
+echo $1,$1:DX,$1:SENSE
+}
+KNOBS=clkdiv,simulate,clk,event0,event1,rgm,sync,trg,rtm_translen
+if   [ "${MODMODEL::5}" = "acq48" ]
+then KNOBS=$KNOBS,es_enable,dclock_reset
+elif [ "${MODMODEL::5}" = "acq42" ]
+then KNOBS=$KNOBS,es_enable,bank_mask
+else KNOBS=$KNOBS
+fi
+cat > $file <<EOF
+#$file
+PEERS=$SITES
+KNOBS=$KNOBS
+EOF
+}
+
+setup_transient() {
+file="/mnt/local/sysconfig/transient.init"
+
+## RTM_TRANSLEN
+if [ -f /dev/acq400.1.knobs/rtm_translen ]
+then RTM_TRANSLEN="set.site 1 rtm_translen $NSAMPLES
+"
+fi
+
+## BANK_MASK425
+if [ ! -z $BANK_MASK ] && [ "${MODMODEL::6}" = "acq425" ]
+then BANK_MASK425="## select active channels for ACQ425 per site
+ # ABCD  # CH01..CH16
+ # ABC   # CH01..CH12
+ # AB    # CH01..CH08
+ # A     # CH01..CH04
+set.site 1 bank_mask $BANK_MASK
+"
+fi
+
+## MGT482_SITES
+if [ "${MGTMODEL::6}" = "mgt482" ]
+then MGT482_SITES="## set aggregator sites for MFG482-SFP
+set.site A aggregator sites=$SITESA
+set.site B aggregator sites=$SITESB
+"
+fi
+
+if [ "${MODMODEL::2}" = "ao" ]
+then PLAYRUN="
+play0 $SITES
+"
+else PLAYRUN="
+run0 $SITES
+make-ch-server
+"
+fi
+cat > $file <<EOF
+#$file
+# loads before loading sites
+COOKED=0 NSAMPLES=$NSAMPLES NCHAN=$NCHAN TYPE=SHORT
+transient PRE=$NSAMPLES POST=$NSAMPLES OSAM=1 SOFT_TRIGGER=1 DEMUX=0
+
+set.site 1 clkdiv=66
+set.site 1 clk=1,1,1
+set.site 1 trg=1,1,1
+$RTM_TRANSLEN$BANK_MASK425$MGT482_SITES
+$PLAYRUN
+EOF
+}
+
+setup_sysconfig() {
+mkdir -p "/mnt/local/sysconfig"
+setup_acq400
+setup_bos
+setup_epics
+setup_site1peers
+setup_transient
+}
+
+setup_rc_user() {
+file="/mnt/local/rc.user"
+if   [ "${MODMODEL::5}" = "ao420" ]
+then CARE="
+/usr/local/CARE/${CARMODEL::7}+acq42x.init 10000000 100 # 10MHz/100 = 100kHz
+"
+elif [ "${MODMODEL::5}" = "acq42" ]
+then CARE="
+/usr/local/CARE/${CARMODEL::7}+acq42x.init 10000000 10 # 10MHz/10 = 1MHz
+"
+elif [ "${MODMODEL::5}" = "acq48" ]
+then CARE="
+/usr/local/CARE/${CARMODEL::7}+acq480.init 10M
+/usr/local/CARE/acq480_streamd.0.conf&
+cp /usr/local/CARE/acq400_streamd.0.conf-soft_trigger /etc/sysconfig/acq400_streamd.0.conf
+"
+fi
+
+cat > $file <<EOF
+#$file
+$CARE
+. /mnt/local/rc.user.custom
+EOF
+}
+
+cleanup_all
+install_all
+setup_rc_user
+setup_sysconfig
+sync
+sync
+[ -z $1 ]||reboot
