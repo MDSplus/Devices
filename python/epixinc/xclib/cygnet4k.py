@@ -186,6 +186,9 @@ def compile_helper(debug=0):
            '-o', '/tmp/libcygnet4k.so', '-']
     if debug:
         cmd[1:1] = ['-g', '-O0', '-DDEBUG=%d' % debug]
+    else:
+        cmd[1:1] = ['-O3']
+
     process = subprocess.Popen(cmd, stdin=subprocess.PIPE, bufsize=-1)
     process.stdin.write(code)
     process.stdin.close()
@@ -564,7 +567,7 @@ class cygnet4k(object):
                     dim = (ticks - tick_off) * tick_slope
                     pixels = self._chk(self.pxd_readushort(
                         um, buf, roi[0], roi[1], roi[0]+roi[2], roi[1]+roi[3],
-                        buffer, pixelin, ctypes.c_char_p("Grey")
+                        buffer, pixelin, ctypes.c_char_p(b"Grey")
                     ), CygnetExcComm, "readushort")
                     if pixels <= 0:
                         print("ERROR: pixels = %d" % pixels)
